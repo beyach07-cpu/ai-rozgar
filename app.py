@@ -6,7 +6,7 @@ import pypdf
 import pytesseract
 from sentence_transformers import SentenceTransformer, util
 
-# Page Config
+# Page Configuration
 st.set_page_config(
     page_title="AI Rozgar — Career Diagnostic",
     page_icon="💼",
@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
-# 1. LOAD MODEL (Cached taake baar baar load na ho)
+# 1. LOAD MODEL (Cached)
 # -------------------------------------------------
 @st.cache_resource
 def load_model():
@@ -78,93 +78,72 @@ JOB_ROLES = {
     "Sales / Business Development": ["Lead Generation", "Cold Calling", "CRM", "Negotiation", "B2B Sales"]
 }
 
-# Pre-compute job embeddings once
-job_titles = list(JOB_ROLES.keys())
-job_descriptions = [f"Job role: {title}. Core competencies: {', '.join(skills)}" for title, skills in JOB_ROLES.items()]
+job_titles = sorted(list(JOB_ROLES.keys()))
+job_descriptions = [f"Job role: {title}. Core competencies: {', '.join(skills)}" for title, skills in sorted(JOB_ROLES.items())]
 job_embeddings = model.encode(job_descriptions, convert_to_tensor=True)
 
 # -------------------------------------------------
-# 3. ROBUST TEXT EXTRACTION (MOBILE + LAPTOP SYNC)
+# 3. TEXT & SKILL EXTRACTION
 # -------------------------------------------------
 def preprocess_image_for_ocr(image):
-    """Mobile photo orientation aur contrast fix karta hai taake text clear read ho"""
     try:
-        # EXIF auto-rotation (Mobile camera angle fix)
         image = ImageOps.exif_transpose(image)
     except Exception:
         pass
-    
-    # Grayscale conversion
     image = image.convert('L')
-    
-    # Contrast boost (Blurry text ko dark banata hai)
     enhancer = ImageEnhance.Contrast(image)
-    image = enhancer.enhance(1.8)
-    return image
+    return enhancer.enhance(1.8)
 
 def extract_text(file_obj, raw_text):
     if raw_text and len(raw_text.strip()) > 30:
         return raw_text.strip()
-    
     if not file_obj:
         return ""
-    
     text = ""
     file_name = file_obj.name.lower()
-    
-    # PDF Processing
     if file_name.endswith('.pdf'):
         try:
             reader = pypdf.PdfReader(file_obj)
             for page in reader.pages:
-                page_content = page.extract_text()
-                if page_content:
-                    text += page_content + "\n"
+                c = page.extract_text()
+                if c: text += c + "\n"
         except Exception:
             pass
-            
-    # Image / Photo Processing (PNG, JPG, JPEG)
     else:
         try:
             img = Image.open(file_obj)
-            processed_img = preprocess_image_for_ocr(img)
-            # Custom Tesseract configuration for consistent line reads
-            custom_config = r'--oem 3 --psm 6'
-            text = pytesseract.image_to_string(processed_img, config=custom_config)
+            processed = preprocess_image_for_ocr(img)
+            text = pytesseract.image_to_string(processed, config=r'--oem 3 --psm 6')
         except Exception:
             try:
-                # Fallback basic scan
                 text = pytesseract.image_to_string(Image.open(file_obj))
             except Exception:
                 pass
-                
     return text.strip()
 
 def check_skill_in_text(skill, text):
-    """Regex boundary matching: case mismatch ya word formatting errors ko door karta hai"""
     escaped = re.escape(skill.lower())
     pattern = rf'\b{escaped}\b'
     return bool(re.search(pattern, text.lower()))
 
 # -------------------------------------------------
-# 4. STREAMLIT USER INTERFACE
+# 4. APP UI (ENGLISH)
 # -------------------------------------------------
 st.title("💼 AI Rozgar — Intelligent Career Diagnostic")
-st.write("Apna CV upload karein aur 50 industry jobs ke hisaab se **Readiness %**, **Missing Skills Roadmap**, aur **1-Click Cover Letter** hasil karein.")
+st.write("Upload your resume to evaluate job alignment across 50 top industry roles, identify skill gaps, and access free learning resources.")
 
-col1, col2 = st.columns([1, 1.25], gap="large")
+col1, col2 = st.columns([1, 1.3], gap="large")
 
 with col1:
-    st.subheader("📄 Upload CV")
+    st.subheader("📄 Upload Resume")
     uploaded_file = st.file_uploader(
         "Upload Resume (PDF, PNG, JPG)",
-        type=["pdf", "png", "jpg", "jpeg"],
-        help="Best results ke liye PDF ya saaf photo upload karein."
+        type=["pdf", "png", "jpg", "jpeg"]
     )
     pasted_text = st.text_area(
-        "Ya Direct Text Paste Karein",
+        "Or Paste Resume Text Directly",
         height=140,
-        placeholder="Agar photo blur ho to yahan direct CV text copy paste kar sakte hain..."
+        placeholder="Paste your resume text here if you prefer not to upload a file..."
     )
     analyze_btn = st.button("🚀 Run AI Analysis", type="primary", use_container_width=True)
 
@@ -176,63 +155,88 @@ with col2:
             cv_text = extract_text(uploaded_file, pasted_text)
             
             if not cv_text or len(cv_text) < 30:
-                st.error("⚠️ CV se text read nahi ho saka. Barah-e-karam saaf PDF upload karein ya direct text paste karein.")
+                st.error("⚠️ Unable to extract text. Please upload a clear PDF file or paste the plain text directly.")
             else:
-                # Semantic Similarity Calculation
-                cv_emb = model.encode(cv_text, convert_to_tensor=True)
-                cosine_scores = util.cos_sim(cv_emb, job_embeddings)[0]
-                
-                scores = [(job_titles[i], float(cosine_scores[i])) for i in range(len(job_titles))]
-                scores.sort(key=lambda x: x[1], reverse=True)
-                
-                top_role, top_val = scores[0]
-                # Normalized percentage formula
-                top_pct = min(max(int((top_val + 0.25) * 100), 20), 98)
-                
-                # Hero Match Card
-                st.success(f"### 🎯 Primary Job Match: **{top_role}** ({top_pct}% Ready)")
-                
-                tab1, tab2, tab3 = st.tabs(["💡 Missing Skills & YouTube Links", "📈 All Top Matches", "📝 Tailored Cover Letter"])
-                
-                with tab1:
-                    target_skills = JOB_ROLES[top_role]
-                    # Upgraded regex matching
-                    found = [s for s in target_skills if check_skill_in_text(s, cv_text)]
-                    missing = [s for s in target_skills if not check_skill_in_text(s, cv_text)]
-                    
-                    if found:
-                        st.markdown("**Existing Strengths Detected:**")
-                        st.markdown(" ".join([f"`✓ {s}`" for s in found]))
-                    
-                    st.divider()
-                    
-                    if missing:
-                        st.markdown(f"#### Ye **{len(missing)} skills** seekh kar aapka match **100%** ho sakta hai:")
-                        for s in missing:
-                            yt_query = urllib.parse.quote(f"{s} complete crash course tutorial for beginners")
-                            yt_link = f"https://www.youtube.com/results?search_query={yt_query}"
-                            st.markdown(f"- 🔴 **{s}**: [Free YouTube Lectures Yahan Dekhein ↗]({yt_link})")
-                    else:
-                        st.info("🎉 Shabash! Aap is job profile ke tamam zaroori core skills meet kar rahe hain.")
-                
-                with tab2:
-                    st.write("**Top 6 Relevant Job Matches:**")
-                    for role, score in scores[:6]:
-                        pct = min(max(int((score + 0.25) * 100), 15), 98)
-                        st.write(f"**{role}** — `{pct}%`")
-                        st.progress(pct / 100)
-                
-                with tab3:
-                    cover_letter = f"""Dear Hiring Team,
+                st.session_state["cv_text"] = cv_text
 
-I am writing to express my strong interest in the {top_role} role. Based on my technical background and practical experience, my skills align closely with your core requirements, particularly in {', '.join(found[:3]) if found else 'core domain practices'}.
+    if "cv_text" in st.session_state:
+        cv_text = st.session_state["cv_text"]
+        cv_emb = model.encode(cv_text, convert_to_tensor=True)
+        cosine_scores = util.cos_sim(cv_emb, job_embeddings)[0]
+        
+        scores_dict = {}
+        scores_list = []
+        for i, title in enumerate(job_titles):
+            val = float(cosine_scores[i])
+            pct = min(max(int((val + 0.25) * 100), 20), 98)
+            scores_dict[title] = pct
+            scores_list.append((title, pct))
+            
+        scores_list.sort(key=lambda x: x[1], reverse=True)
+        top_auto_role, top_auto_pct = scores_list[0]
+        
+        # Primary Recommendation Banner
+        st.success(f"🎯 Primary Recommended Role: **{top_auto_role}** ({top_auto_pct}% Match)")
+        
+        # Job Selection
+        st.markdown("### 🔍 Select a Specific Role to Inspect:")
+        selected_job = st.selectbox(
+            "Choose a target job profile:",
+            options=job_titles,
+            index=job_titles.index(top_auto_role)
+        )
+        
+        current_job_pct = scores_dict[selected_job]
+        req_skills = JOB_ROLES[selected_job]
+        
+        found_skills = [s for s in req_skills if check_skill_in_text(s, cv_text)]
+        missing_skills = [s for s in req_skills if not check_skill_in_text(s, cv_text)]
+        
+        st.info(f"Readiness Score for **{selected_job}**: **{current_job_pct}%**")
 
-I am proactive about continuous technical growth and am currently refining advanced workflows in {', '.join(missing[:2]) if missing else 'emerging industry technologies'} to deliver high-impact results for your team.
+        tab1, tab2, tab3 = st.tabs([
+            f"💡 {selected_job} Missing Skills", 
+            "📈 Top Role Match Scores", 
+            f"📝 {selected_job} Cover Letter"
+        ])
+        
+        # TAB 1: Skill Roadmap
+        with tab1:
+            if found_skills:
+                st.markdown("**Identified Strengths:**")
+                st.markdown(" ".join([f"`✓ {s}`" for s in found_skills]))
+            
+            st.divider()
+            
+            if missing_skills:
+                st.markdown(f"#### Skills to acquire for a 100% match in **{selected_job}**:")
+                for s in missing_skills:
+                    yt_query = urllib.parse.quote(f"{s} complete course tutorial for beginners")
+                    yt_link = f"https://www.youtube.com/results?search_query={yt_query}"
+                    st.markdown(f"- 🔴 **{s}**: [Watch Free Tutorials on YouTube ↗]({yt_link})")
+            else:
+                st.balloons()
+                st.success(f"🎉 Excellent! You have covered all essential core skills for **{selected_job}**.")
+        
+        # TAB 2: Match Overview
+        with tab2:
+            st.write("**Top Relevant Role Matches:**")
+            for role, pct in scores_list[:10]:
+                st.write(f"**{role}** — `{pct}%`")
+                st.progress(pct / 100)
+                
+        # TAB 3: Cover Letter
+        with tab3:
+            cover_letter = f"""Dear Hiring Team,
 
-Thank you for your time and consideration. I look forward to the opportunity to discuss my application further.
+I am writing to express my enthusiastic interest in the {selected_job} position. After reviewing your core requirements, I am confident that my technical skills and professional background align strongly with your expectations, particularly in {', '.join(found_skills[:3]) if found_skills else 'core industry workflows'}.
+
+I place a strong emphasis on continuous growth and am currently expanding my capabilities in {', '.join(missing_skills[:2]) if missing_skills else 'advanced architecture and best practices'} to ensure modern, high-impact contributions to your team.
+
+Thank you for your time and consideration. I look forward to the opportunity to discuss how my qualifications align with your objectives.
 
 Sincerely,
 Applicant"""
-                    st.text_area("Ready-to-use Tailored Cover Letter", value=cover_letter, height=220)
+            st.text_area("Tailored Cover Letter (1-Click Ready)", value=cover_letter, height=220)
     else:
-        st.info("Resume upload karein aur 'Run AI Analysis' par click karein.")
+        st.info("Upload your resume and click 'Run AI Analysis' to view results.")
