@@ -1,4 +1,4 @@
-%%writefile app.py
+
 import urllib.parse
 from PIL import Image
 import pypdf
