@@ -1,13 +1,19 @@
-
+import streamlit as st
 import urllib.parse
 from PIL import Image
 import pypdf
 import pytesseract
-import gradio as gr
 from sentence_transformers import SentenceTransformer, util
 
-# Model load
-model = SentenceTransformer('all-MiniLM-L6-v2')
+# Page Config
+st.set_page_config(page_title="AI Rozgar - Career Matcher", page_icon="💼", layout="wide")
+
+# Cache model loading for fast performance
+@st.cache_resource
+def load_model():
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+model = load_model()
 
 # Jobs Database
 JOB_ROLES = {
@@ -43,16 +49,15 @@ job_titles = list(JOB_ROLES.keys())
 job_descriptions = [f"Job role: {title}. Core competencies: {', '.join(skills)}" for title, skills in JOB_ROLES.items()]
 job_embeddings = model.encode(job_descriptions, convert_to_tensor=True)
 
-def extract_text(file_obj, raw_text_input):
-    if raw_text_input and len(raw_text_input.strip()) > 30:
-        return raw_text_input.strip()
+def extract_text(file_obj, raw_text):
+    if raw_text and len(raw_text.strip()) > 30:
+        return raw_text.strip()
     if not file_obj:
         return ""
-    path = file_obj.name if hasattr(file_obj, 'name') else file_obj
     text = ""
-    if path.lower().endswith('.pdf'):
+    if file_obj.name.lower().endswith('.pdf'):
         try:
-            reader = pypdf.PdfReader(path)
+            reader = pypdf.PdfReader(file_obj)
             for page in reader.pages:
                 t = page.extract_text()
                 if t: text += t + "\n"
@@ -60,101 +65,78 @@ def extract_text(file_obj, raw_text_input):
             pass
     else:
         try:
-            text = pytesseract.image_to_string(Image.open(path))
+            image = Image.open(file_obj)
+            text = pytesseract.image_to_string(image)
         except Exception:
             pass
     return text.strip()
 
-def analyze_resume(file_obj, raw_text_input):
-    cv_text = extract_text(file_obj, raw_text_input)
-    if not cv_text or len(cv_text) < 40:
-        msg = "<div style='background: #fef2f2; border: 1px solid #f87171; border-radius: 8px; padding: 16px; color: #991b1b;'>⚠️ CV text read nahi ho saka. Clear PDF ya Image upload karein.</div>"
-        return msg, {}, "", "", ""
+# UI Layout
+st.title("💼 AI Rozgar — Intelligent Career Diagnostic")
+st.write("Apna CV upload karein aur 50 jobs ke sath match, missing skills ke YouTube lectures aur 1-click cover letter payein.")
 
-    cv_embedding = model.encode(cv_text, convert_to_tensor=True)
-    cosine_scores = util.cos_sim(cv_embedding, job_embeddings)[0]
+col1, col2 = st.columns([1, 1.3], gap="medium")
 
-    scores = [(job_titles[i], float(cosine_scores[i])) for i in range(len(job_titles))]
-    scores.sort(key=lambda x: x[1], reverse=True)
+with col1:
+    st.subheader("📄 Upload CV")
+    uploaded_file = st.file_uploader("Upload Resume (PDF ya Photo)", type=["pdf", "png", "jpg", "jpeg"])
+    pasted_text = st.text_area("Ya Direct Text Paste Karein", height=150, placeholder="Paste CV text here...")
+    analyze_btn = st.button("🚀 Run AI Analysis", type="primary", use_container_width=True)
 
-    top_role, top_val = scores[0]
-    top_score_pct = min(int((top_val + 0.28) * 100), 98)
+with col2:
+    st.subheader("📊 Career Diagnostic Report")
+    if analyze_btn:
+        with st.spinner("Analyzing resume against industry roles..."):
+            cv_text = extract_text(uploaded_file, pasted_text)
+            
+            if not cv_text or len(cv_text) < 30:
+                st.error("⚠️ Text read nahi ho saka. Barah-e-karam clear PDF/Image upload karein ya direct text paste karein.")
+            else:
+                cv_emb = model.encode(cv_text, convert_to_tensor=True)
+                cosine_scores = util.cos_sim(cv_emb, job_embeddings)[0]
+                
+                scores = [(job_titles[i], float(cosine_scores[i])) for i in range(len(job_titles))]
+                scores.sort(key=lambda x: x[1], reverse=True)
+                
+                top_role, top_val = scores[0]
+                top_pct = min(int((top_val + 0.28) * 100), 98)
+                
+                # Hero Card
+                st.success(f"### Top Match: **{top_role}** ({top_pct}% Ready)")
+                
+                tab1, tab2, tab3 = st.tabs(["💡 Missing Skills & Lectures", "📊 Match % (Top Roles)", "📝 1-Click Cover Letter"])
+                
+                with tab1:
+                    target_skills = JOB_ROLES[top_role]
+                    missing = [skill for skill in target_skills if skill.lower() not in cv_text.lower()]
+                    found = [skill for skill in target_skills if skill.lower() in cv_text.lower()]
+                    
+                    if found:
+                        st.markdown("**Existing Strengths Detected:** " + ", ".join([f"`{s}`" for s in found]))
+                    
+                    if missing:
+                        st.markdown("#### Ye skills seekhein 100% match ke liye:")
+                        for skill in missing:
+                            yt_link = f"https://www.youtube.com/results?search_query={urllib.parse.quote(skill + ' crash course tutorial')}"
+                            st.markdown(f"- 🔴 **{skill}**: [YouTube Free Lectures Yahan Dekhein ↗]({yt_link})")
+                    else:
+                        st.info("🎉 Shabash! Aap is role ke tamam core technical skills meet kar rahe hain.")
+                
+                with tab2:
+                    for role, score in scores[:6]:
+                        pct = min(int((score + 0.28) * 100), 98)
+                        st.write(f"**{role}** ({pct}%)")
+                        st.progress(pct / 100)
+                
+                with tab3:
+                    cover_letter = f"""Dear Hiring Team,
 
-    chart_data = {role: min(int((score + 0.28) * 100), 98) for role, score in scores[:8]}
+I am writing to express my strong enthusiasm for the {top_role} role. My practical skills align closely with your core requirements, specifically in {', '.join(found[:3]) if found else 'key domain workflows'}. 
 
-    target_skills = JOB_ROLES[top_role]
-    missing = [skill for skill in target_skills if skill.lower() not in cv_text.lower()]
-    found = [skill for skill in target_skills if skill.lower() in cv_text.lower()]
-
-    badge_html = f"""
-    <div style='background: linear-gradient(135deg, #1e293b, #0f172a); border-radius: 12px; padding: 20px; color: #ffffff;'>
-        <div style='display: flex; justify-content: space-between; align-items: center;'>
-            <div>
-                <span style='background: #3b82f6; font-size: 11px; padding: 4px 8px; border-radius: 4px; font-weight: 600;'>Primary Recommendation</span>
-                <h2 style='margin: 8px 0 0 0; font-size: 22px;'>{top_role}</h2>
-            </div>
-            <div style='text-align: right;'>
-                <span style='font-size: 32px; font-weight: 800; color: #38bdf8;'>{top_score_pct}%</span>
-                <div style='font-size: 12px; color: #94a3b8;'>Match Score</div>
-            </div>
-        </div>
-    </div>
-    """
-
-    roadmap_html = "<div style='display: flex; flex-direction: column; gap: 8px; margin-top: 10px;'>"
-    if missing:
-        for skill in missing:
-            yt_query = urllib.parse.quote(f"{skill} crash course tutorial")
-            yt_link = f"https://www.youtube.com/results?search_query={yt_query}"
-            roadmap_html += f"""
-            <div style='display: flex; justify-content: space-between; align-items: center; background: #ffffff; padding: 10px; border: 1px solid #e2e8f0; border-radius: 6px;'>
-                <span style='color: #e11d48; font-weight: 600;'>• Missing: {skill}</span>
-                <a href='{yt_link}' target='_blank' style='background: #ef4444; color: white; padding: 4px 10px; border-radius: 4px; font-size: 12px; text-decoration: none;'>Watch on YouTube ↗</a>
-            </div>
-            """
-    else:
-        roadmap_html += "<div style='color: #059669;'>Aap is role ke liye mukammal ready hain!</div>"
-    roadmap_html += "</div>"
-
-    cover_letter = f"""Dear Hiring Team,
-
-I am writing to express my enthusiasm for the {top_role} role. My practical skills align closely with your core requirements, specifically in {', '.join(found[:3]) if found else 'key domain workflows'}. I am also proactively leveling up in {', '.join(missing[:2]) if missing else 'emerging standards'} to ensure high-impact results.
+I am also actively sharpening my expertise in {', '.join(missing[:2]) if missing else 'emerging standards'} to ensure high-impact results for your engineering team.
 
 Sincerely,
-Applicant
-"""
-    return badge_html, chart_data, roadmap_html, cover_letter, cv_text[:500]
-
-custom_css = ".gradio-container { max-width: 1000px !important; margin: auto !important; }"
-
-with gr.Blocks(title="AI Rozgar", css=custom_css, theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 💼 AI Rozgar — Career Matcher")
-    with gr.Row():
-        with gr.Column(scale=4):
-            with gr.Tabs():
-                with gr.TabItem("📄 Upload File"):
-                    cv_file = gr.File(label="Upload Resume", file_types=[".pdf", ".png", ".jpg", ".jpeg"])
-                with gr.TabItem("✍️ Text Paste"):
-                    cv_raw_text = gr.Textbox(label="Paste CV Text", lines=6)
-            analyze_btn = gr.Button("🚀 Run AI Analysis", variant="primary")
-            with gr.Accordion("Preview Extracted Text", open=False):
-                raw_preview = gr.Textbox(lines=4, interactive=False)
-
-        with gr.Column(scale=6):
-            hero_output = gr.HTML(value="<div>Upload resume to view analysis.</div>")
-            with gr.Tabs():
-                with gr.TabItem("📊 Match %"):
-                    chart_output = gr.Label(label="Top Job Match", num_top_classes=6)
-                with gr.TabItem("💡 Missing Skills"):
-                    roadmap_output = gr.HTML()
-                with gr.TabItem("📝 Cover Letter"):
-                    cover_letter_box = gr.Textbox(label="Cover Letter", lines=6)
-
-    analyze_btn.click(
-        fn=analyze_resume,
-        inputs=[cv_file, cv_raw_text],
-        outputs=[hero_output, chart_output, roadmap_output, cover_letter_box, raw_preview]
-    )
-
-if __name__ == "__main__":
-    demo.launch()
+Applicant"""
+                    st.text_area("Ready-to-use Cover Letter", value=cover_letter, height=200)
+    else:
+        st.info("CV upload karein aur 'Run AI Analysis' dabayein.")
